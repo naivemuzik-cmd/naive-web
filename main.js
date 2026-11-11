@@ -2,16 +2,26 @@
   const root = document.documentElement;
   const nav = document.getElementById("nav");
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const scrollTimeline = window.CSS && CSS.supports("animation-timeline: view()");
 
-  // --- Foto de fondo + barra: siguen el scroll de la portada ---
+  // --- Entrada de la portada: las letras aparecen cuando la tipografía ya cargó ---
+  const showHero = () => root.classList.add("ready");
+  Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 1200))]).then(() => requestAnimationFrame(showHero));
+
+  // --- Foto de fondo, barra y progreso siguen el scroll ---
   let ticking = false;
   function onScroll() {
     if (ticking) return;
     ticking = true;
     requestAnimationFrame(() => {
-      const p = Math.min(Math.max(window.scrollY / (window.innerHeight * 0.9), 0), 1);
+      const y = window.scrollY;
+      const p = Math.min(Math.max(y / (window.innerHeight * 0.9), 0), 1);
       root.style.setProperty("--p", p.toFixed(3));
-      nav.classList.toggle("scrolled", window.scrollY > 10);
+      nav.classList.toggle("scrolled", y > 10);
+      if (!scrollTimeline) {
+        const max = document.documentElement.scrollHeight - window.innerHeight;
+        nav.style.setProperty("--progress", max > 0 ? (y / max).toFixed(4) : 0);
+      }
       ticking = false;
     });
   }
@@ -21,18 +31,37 @@
 
   // --- Menú en celular ---
   const menuBtn = document.getElementById("nav-menu");
+  const closeMenu = () => {
+    nav.classList.remove("open");
+    menuBtn.setAttribute("aria-expanded", "false");
+    menuBtn.textContent = "MENU";
+  };
   menuBtn.addEventListener("click", () => {
     const open = nav.classList.toggle("open");
     menuBtn.setAttribute("aria-expanded", String(open));
     menuBtn.textContent = open ? "CLOSE" : "MENU";
   });
-  document.querySelectorAll("#nav-links a").forEach((a) =>
-    a.addEventListener("click", () => {
-      nav.classList.remove("open");
-      menuBtn.setAttribute("aria-expanded", "false");
-      menuBtn.textContent = "MENU";
-    })
-  );
+  document.querySelectorAll("#nav-links a").forEach((a) => a.addEventListener("click", closeMenu));
+
+  // --- Sección activa en la barra ---
+  const links = new Map([...document.querySelectorAll("#nav-links a")].map((a) => [a.getAttribute("href").slice(1), a]));
+  const spy = new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      if (!e.isIntersecting) return;
+      links.forEach((a, id) => a.classList.toggle("active", id === e.target.id));
+    });
+  }, { rootMargin: "-45% 0px -50% 0px" });
+  links.forEach((_, id) => { const s = document.getElementById(id); if (s) spy.observe(s); });
+
+  // --- Aparición al hacer scroll (solo si el navegador no lo hace con CSS) ---
+  if (!scrollTimeline && !reduceMotion) {
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+      });
+    }, { rootMargin: "0px 0px -8% 0px" });
+    document.querySelectorAll("[data-reveal]").forEach((el) => io.observe(el));
+  }
 
   // --- Carrusel de temas (flechas, vuelve al principio al llegar al final) ---
   const releases = document.getElementById("releases");
@@ -48,81 +77,91 @@
     })
   );
 
-  // --- Carruseles de live sets ---
-  const DURATION = 6000;
-  document.querySelectorAll("[data-carousel]").forEach((carousel, ci) => {
-    const slides = [...carousel.querySelectorAll(".slide")];
-    const barsBox = carousel.querySelector(".bars");
-    let index = 0;
-    let timer = null;
-    let remaining = DURATION;
-    let startedAt = 0;
+  // --- Filtro de live sets (con transición animada si el navegador la soporta) ---
+  const chips = document.querySelectorAll(".chip");
+  const sets = [...document.querySelectorAll(".set")];
+  sets.forEach((s, i) => { s.style.viewTransitionName = "set-" + i; });
+  chips.forEach((chip) =>
+    chip.addEventListener("click", () => {
+      const f = chip.dataset.filter;
+      const apply = () => {
+        chips.forEach((c) => {
+          const on = c === chip;
+          c.classList.toggle("is-on", on);
+          c.setAttribute("aria-pressed", String(on));
+        });
+        sets.forEach((s) => { s.hidden = f !== "all" && s.dataset.platform !== f; });
+      };
+      if (document.startViewTransition && !reduceMotion) document.startViewTransition(apply);
+      else apply();
+    })
+  );
 
-    const bars = slides.map((_, i) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "bar";
-      b.setAttribute("aria-label", `Set ${i + 1}`);
-      b.innerHTML = "<span></span>";
-      b.addEventListener("click", () => go(i));
-      barsBox.appendChild(b);
-      return b;
-    });
-    carousel.style.setProperty("--dur", DURATION + "ms");
+  // --- Reproductor: YouTube, SoundCloud y Spotify adentro de la web ---
+  const player = document.getElementById("player");
+  const frame = document.getElementById("player-frame");
+  const pTitle = document.getElementById("player-title");
+  const pExt = document.getElementById("player-ext");
+  const scSrc = (url, extra) =>
+    "https://w.soundcloud.com/player/?url=" + encodeURIComponent(url) +
+    "&color=%23ff5500&auto_play=true&hide_related=true&show_comments=false&show_user=true&show_reposts=false&show_teaser=false" + extra;
 
-    function paint() {
-      slides.forEach((s, i) => {
-        s.classList.toggle("is-active", i === index);
-        s.tabIndex = i === index ? 0 : -1;
-      });
-      bars.forEach((b, i) => {
-        b.classList.toggle("done", i < index);
-        b.classList.remove("active");
-      });
-      void bars[index].offsetWidth; // reinicia la animación de la barra
-      bars[index].classList.add("active");
+  function embedFor(el) {
+    const kind = el.dataset.embed;
+    if (kind === "youtube") {
+      const start = el.dataset.start ? "&start=" + el.dataset.start : "";
+      return { kind, src: `https://www.youtube-nocookie.com/embed/${el.dataset.id}?autoplay=1&rel=0&playsinline=1${start}`, label: "Abrir en YouTube ↗" };
     }
-    function schedule(ms) {
-      clearTimeout(timer);
-      if (reduceMotion) return;
-      startedAt = Date.now();
-      remaining = ms;
-      timer = setTimeout(() => go((index + 1) % slides.length), ms);
-    }
-    function go(i) {
-      index = i;
-      paint();
-      schedule(DURATION);
-    }
-    function pause() {
-      if (carousel.classList.contains("paused")) return;
-      clearTimeout(timer);
-      remaining -= Date.now() - startedAt;
-      carousel.classList.add("paused");
-    }
-    function resume() {
-      if (!carousel.classList.contains("paused")) return;
-      carousel.classList.remove("paused");
-      schedule(Math.max(remaining, 300));
-    }
+    if (kind === "soundcloud") return { kind, src: scSrc(el.dataset.url, "&visual=true"), label: "Abrir en SoundCloud ↗" };
+    if (kind === "spotify") return { kind, src: `https://open.spotify.com/embed/${el.dataset.type}/${el.dataset.id}?utm_source=generator&theme=0`, label: "Abrir en Spotify ↗" };
+    return null;
+  }
 
-    carousel.addEventListener("mouseenter", pause);
-    carousel.addEventListener("mouseleave", resume);
-    carousel.addEventListener("focusin", pause);
-    carousel.addEventListener("focusout", resume);
+  document.querySelectorAll("[data-embed]").forEach((el) =>
+    el.addEventListener("click", (e) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; // dejar abrir en pestaña nueva
+      const emb = embedFor(el);
+      if (!emb || !player.showModal) return;
+      e.preventDefault();
+      player.className = "modal player is-" + emb.kind + (el.dataset.type === "track" ? " is-track" : "");
+      pTitle.textContent = el.dataset.title || "";
+      pExt.href = el.href;
+      pExt.textContent = emb.label;
+      frame.innerHTML = "";
+      const iframe = document.createElement("iframe");
+      iframe.src = emb.src;
+      iframe.title = el.dataset.title || "Reproductor";
+      iframe.allow = "autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write";
+      iframe.allowFullscreen = true;
+      frame.appendChild(iframe);
+      player.showModal();
+    })
+  );
+  player.addEventListener("close", () => { frame.innerHTML = ""; });
 
-    paint();
-    // el segundo carrusel arranca desfasado para que no cambien a la vez
-    setTimeout(() => schedule(DURATION), ci * 1500);
-  });
+  // --- Highlights de la bio: el reproductor de SoundCloud se carga recién al tocar play ---
+  document.querySelectorAll(".sc-facade").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const iframe = document.createElement("iframe");
+      iframe.className = "sc-player";
+      iframe.src = scSrc(btn.dataset.url, "&visual=false");
+      iframe.title = btn.querySelector(".sc-facade-title").textContent;
+      iframe.allow = "autoplay";
+      btn.replaceWith(iframe);
+    })
+  );
 
   // --- Bio completa ---
   document.querySelectorAll("[data-bio]").forEach((btn) =>
     btn.addEventListener("click", () => document.getElementById(btn.dataset.bio).showModal())
   );
-  document.querySelectorAll(".bio-dialog").forEach((dlg) => {
+  document.querySelectorAll(".modal").forEach((dlg) => {
     dlg.querySelector(".dialog-close").addEventListener("click", () => dlg.close());
-    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+    dlg.addEventListener("click", (e) => {
+      const r = dlg.getBoundingClientRect();
+      const outside = e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+      if (e.target === dlg && outside) dlg.close();
+    });
   });
 
   // --- Copiar email ---
